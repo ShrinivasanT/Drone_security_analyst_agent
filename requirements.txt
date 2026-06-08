@@ -20,9 +20,9 @@ langchain-openai==0.3.0
 # VLM / embeddings client (OpenAI GPT-4o + text-embedding-3-small)
 openai==1.59.6
 
-# Dataset ingestion
-datasets==3.2.0
-pillow==11.1.0
+# Video ingestion — sample frames from source video clips
+opencv-python-headless==4.10.0.84   # cv2.VideoCapture: open clips, sample frames at an interval (no GUI deps, Docker-friendly)
+pillow==11.1.0                       # encode sampled frames as JPEG bytes
 
 # Testing
 pytest==8.3.4

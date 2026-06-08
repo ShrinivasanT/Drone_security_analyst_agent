@@ -4,13 +4,16 @@
 
 ### High-Level Overview
 
-The system is composed of five primary layers. Data flows in one direction — from dataset images through blob storage and the agent pipeline to stored intelligence — while the agent's decision loop runs continuously on top of the stored state.
+The system is composed of five primary layers. Data flows in one direction — from sampled video frames through blob storage and the agent pipeline to stored intelligence — while the agent's decision loop runs continuously on top of the stored state.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        DATASET INGESTION LAYER                         │
-│   HuggingFace datasets / Kaggle CLI  →  data/ingest_runner.py         │
-│   Real images + synthetic telemetry paired per frame                   │
+│                       VIDEO INGESTION LAYER                            │
+│   Source video clip(s) (CCTV / aerial property footage)                │
+│        →  data/video_loader.py  (OpenCV: samples frames at a           │
+│           configurable interval, e.g. 1 frame / N seconds)             │
+│        →  data/ingest_runner.py                                        │
+│   Sampled real video frames + synthetic telemetry paired per frame     │
 └──────────────────────────────────┬─────────────────────────────────────┘
                                    │ PUT image bytes
                                    ▼
@@ -57,9 +60,22 @@ The system is composed of five primary layers. Data flows in one direction — f
 #### Write Path (Ingest)
 
 ```
-data/ingest_runner.py  iterates dataset images
+data/video_loader.py   opens source video(s) with OpenCV (cv2.VideoCapture)
         │
-        ├──► open image file as bytes
+        ├──► sample one frame every N seconds of video time
+        │    (simulates a drone taking periodic snapshots, not full-FPS processing)
+        │
+        ├──► encode sampled frame as JPEG bytes
+        │
+        ├──► generate synthetic telemetry for this frame
+        │    (time-of-day progression, patrol waypoint, lat/lng, altitude)
+        │
+        ▼  yields (frame_bytes, synthetic_telemetry) — same shape as before,
+        │  so everything downstream of this point is unchanged
+        │
+data/ingest_runner.py  iterates sampled video frames
+        │
+        ├──► receive (frame_bytes, telemetry) from video_loader
         │
         ├──► PUT bytes → MinIO  bucket=drone-frames  key=frame_{uuid}.jpg
         │    ← returns: http://minio:9000/drone-frames/frame_{uuid}.jpg
@@ -308,17 +324,21 @@ volumes:
 
 ---
 
-## 2. Data Flow — Real Image Frame to Alert
+## 2. Data Flow — Real Video Frame to Alert
 
 ```
-Dataset image: pedestrian_night_0042.jpg  (from HuggingFace nighttime dataset)
+Source video: night_patrol_clip_03.mp4  (sample CCTV / aerial property footage)
+        │
+        ▼  data/video_loader.py  (cv2.VideoCapture, sample 1 frame / N seconds)
+        │
+Sampled frame at video-time 00:14:32 → frame_0042.jpg
         +
-Synthetic telemetry:
+Synthetic telemetry (generated from sampled position + patrol schedule):
 { time: "00:01", location: "main gate", altitude: 12, lat: 18.52, lng: 73.85 }
         │
         ▼  ingest_runner.py
         │
-        ├─ Upload image bytes → MinIO
+        ├─ Upload sampled-frame bytes → MinIO
         │  ← blob_url: http://localhost:9000/drone-frames/frame_0042.jpg
         │
         ▼  POST /ingest { blob_url, telemetry }
@@ -377,36 +397,51 @@ Synthetic telemetry:
 
 ---
 
-### Phase 1 — Foundation (Blob Storage + Database + Dataset Loader)
+### Phase 1 — Foundation (Blob Storage + Database + Video Frame Loader)
 
-**Goal:** MinIO and PostgreSQL running in Docker, with a working dataset image loader that uploads frames to MinIO and seeds the database.
+**Goal:** MinIO and PostgreSQL running in Docker, with a working video frame sampler that extracts real frames from source video clips, uploads them to MinIO, and seeds the database.
 
 **Tasks:**
 - Write `docker-compose.yml` with `postgres`, `minio`, `minio_init` services
 - Write `db/init.sql` — create `frames`, `events`, `alerts` tables, indexes, and pgvector extension
-- Write `data/dataset_loader.py`
-  - Uses `datasets` library (HuggingFace) to download the nighttime pedestrian dataset and/or cars dataset
-  - Alternatively supports Kaggle CLI download for VIRAT / person detection datasets
-  - Yields `(image_bytes, synthetic_telemetry)` tuples
+- Source video clips to act as the simulated drone feed — **using the UCF-Crime "Normal Videos for Event
+  Recognition" set** already downloaded (~1.1 GB, 49 clips, `Data/Normal_Videos_for_Event_Recognition/...`).
+  Pick a handful of representative clips (varying scene/activity) for the prototype rather than ingesting all 49.
+  These are large binaries — keep them **out of git** (`.gitignore`'d); document the source/download instructions
+  in `docs/video_sources.md` instead so a reviewer can re-fetch them
+- Write `data/video_loader.py`
+  - Opens each source video with OpenCV (`cv2.VideoCapture`)
+  - Samples one frame every *N* seconds of video time (configurable; default e.g. every 2s) — this
+    simulates a drone taking periodic snapshots rather than processing video at full FPS, which would be
+    wasteful and far too costly for per-frame VLM calls
+  - Encodes each sampled frame as JPEG bytes
+  - Generates synthetic telemetry per sampled frame: maps the frame's position in the clip onto a simulated
+    patrol schedule (time-of-day progression, cycling through waypoint locations, lat/lng, altitude) — so a
+    short clip can still produce a plausible "full day of patrol" timeline, including after-hours windows
+  - Yields `(frame_bytes, synthetic_telemetry)` tuples — **same shape as the original image-dataset loader**,
+    so `blob_store`, `ingest_runner`, the agent, and the backend require no changes downstream of this point
 - Write `data/blob_store.py`
   - `boto3` S3 client pointed at MinIO
   - `upload_frame(image_bytes, filename) → blob_url`
   - `get_frame_bytes(blob_url) → bytes`
 - Write `data/ingest_runner.py`
-  - Calls `dataset_loader` → `blob_store.upload_frame` → `POST /ingest`
-  - Configurable: how many frames to ingest, which dataset, frame interval
-- Verify: `docker compose up postgres minio minio_init` → MinIO console at localhost:9001 → bucket created → upload a test image → URL accessible in browser
+  - Calls `video_loader` → `blob_store.upload_frame` → `POST /ingest`
+  - Configurable: which video(s) to sample, sampling interval (seconds/frame), how many frames to ingest
+- Verify: `docker compose up postgres minio minio_init` → MinIO console at localhost:9001 → bucket created →
+  run `video_loader` standalone on a test clip, confirm sampled frames decode correctly and telemetry looks
+  plausible → upload one sampled frame → URL accessible in browser
 
 **Deliverables:**
 - `docker-compose.yml`
 - `db/init.sql`
-- `data/dataset_loader.py`
+- `VIDEO_SOURCE_DIR` config entry pointing at the local clips directory (e.g. `Data/Normal_Videos_for_Event_Recognition/...`) — kept out of git via `.gitignore` (large binaries); `docs/video_sources.md` documents how to re-download them
+- `data/video_loader.py`
 - `data/blob_store.py`
 - `data/ingest_runner.py`
 
 ---
 
-### Phase 2 — VLM Integration (Frame Analysis with Real Images)
+### Phase 2 — VLM Integration (Frame Analysis with Real Video Frames)
 
 **Goal:** A working `analyze_frame` node that fetches a real image from MinIO, sends it to the VLM API, and returns structured JSON.
 
@@ -424,7 +459,7 @@ Synthetic telemetry:
 - Write `agent/db.py`
   - Async SQLAlchemy helpers: `insert_frame()`, `query_similar_frames()`, `insert_event()`, `insert_alert()`
   - `insert_frame()` writes `blob_url` and `embedding` together
-- Unit test: feed 5 real dataset images → assert valid structured JSON returned for each
+- Unit test: feed 5 real frames sampled from source video clips → assert valid structured JSON returned for each
 
 **Deliverables:**
 - `agent/nodes/analyze_frame.py`
@@ -436,7 +471,7 @@ Synthetic telemetry:
 
 ### Phase 3 — LangGraph Agent (Core Loop)
 
-**Goal:** A complete LangGraph graph that processes one real image frame end-to-end and writes results to the database.
+**Goal:** A complete LangGraph graph that processes one real video frame end-to-end and writes results to the database.
 
 **Tasks:**
 - Define `AgentState` TypedDict in `agent/state.py`
@@ -448,7 +483,7 @@ Synthetic telemetry:
   - `agent/nodes/trigger_alert.py` — writes to `alerts` table with blob_url of triggering frame
   - `agent/nodes/update_state.py` — persists frame to PostgreSQL (metadata + blob_url + embedding), advances rolling window
 - Wire the graph in `agent/graph.py` with conditional edges (log vs alert vs both)
-- Integration test: run graph on 10 real dataset images → assert events and alerts written correctly with valid blob_urls
+- Integration test: run graph on 10 real frames sampled from source video clips → assert events and alerts written correctly with valid blob_urls
 
 **Deliverables:**
 - `agent/state.py`
@@ -532,28 +567,28 @@ Synthetic telemetry:
 
 ### Phase 6 — Integration, QA, and Documentation
 
-**Goal:** Full system running end-to-end with real dataset images, documented test cases, README, and demo-ready setup.
+**Goal:** Full system running end-to-end with real video-sourced frames, documented test cases, README, and demo-ready setup.
 
 **QA Test Cases:**
 
 | Test ID | Scenario | Input | Expected Result |
 |---|---|---|---|
-| QA-01 | Vehicle image ingested | Car image from cars196 dataset at 12:00 | Event logged with blob_url; object_type = vehicle |
-| QA-02 | Same vehicle descriptor 3rd time at 23:50 | 3 car images, similar VLM outputs | Alert triggered: "Repeat vehicle, after-hours"; blob_url in alert |
-| QA-03 | Nighttime pedestrian image at 00:01 | Nighttime pedestrian dataset image | Alert triggered: "Person after hours, 00:01" |
-| QA-04 | Loitering — same person/location across 5 frames | 5 consecutive similar nighttime pedestrian images | Alert triggered: "Loitering detected" |
+| QA-01 | Vehicle frame ingested | Frame sampled from daytime traffic clip at 12:00 | Event logged with blob_url; object_type = vehicle |
+| QA-02 | Same vehicle descriptor 3rd time at 23:50 | 3 frames sampled from a clip showing the same vehicle, similar VLM outputs | Alert triggered: "Repeat vehicle, after-hours"; blob_url in alert |
+| QA-03 | Nighttime pedestrian frame at 00:01 | Frame sampled from a night-patrol/CCTV clip, mapped to 00:01 by synthetic telemetry | Alert triggered: "Person after hours, 00:01" |
+| QA-04 | Loitering — same person/location across 5 frames | 5 consecutive frames sampled (close together in video-time) showing the same person/location | Alert triggered: "Loitering detected" |
 | QA-05 | Frame search returns images | Query "truck" or "vehicle" | API returns rows with blob_url; frontend renders thumbnails |
 | QA-06 | Search result image accessible | blob_url from QA-05 | HTTP GET to blob_url returns valid image bytes (200 OK from MinIO) |
 | QA-07 | Chat Q grounded in frames | "Was a vehicle seen after midnight?" | Answer references specific frame timestamps and blob_urls |
-| QA-08 | Session summary | After 20 real frames processed | One-sentence summary covering detected object types and alerts |
-| QA-09 | Normal daytime activity | Daytime vehicle/person images 09:00–17:00 | No alerts; events logged normally with blob_urls |
+| QA-08 | Session summary | After 20 real video-sampled frames processed | One-sentence summary covering detected object types and alerts |
+| QA-09 | Normal daytime activity | Frames sampled from daytime vehicle/person clips, mapped to 09:00–17:00 | No alerts; events logged normally with blob_urls |
 
 **Documentation Tasks:**
-- `README.md` — setup instructions (docker compose up, dataset download, ingest_runner), architecture overview, AI tools used
+- `README.md` — setup instructions (docker compose up, sourcing/placing video clips, running ingest_runner), architecture overview, AI tools used
 - `docs/architecture.md` — this document
-- `docs/datasets.md` — dataset sources, download commands, licensing notes
+- `docs/video_sources.md` — source video clips used (titles, URLs/licences), why each was chosen, sampling-interval rationale, and how synthetic telemetry is derived from sampled frame positions
 - `docs/test_cases.md` — QA scenarios with expected vs actual outputs
-- Record demo video with voiceover showing real frame images in the dashboard
+- Record demo video with voiceover showing real video-sourced frame images in the dashboard
 
 **Deliverables:**
 - `README.md`
@@ -574,10 +609,13 @@ drone-security-agent/
 ├── db/
 │   └── init.sql
 │
-├── data/
-│   ├── dataset_loader.py        # HuggingFace / Kaggle dataset download + iteration
+├── data/                        # NOTE: source video clips are NOT stored here / in git (large binaries,
+│   │                            #   .gitignore'd) — VIDEO_SOURCE_DIR env var points at them locally;
+│   │                            #   see docs/video_sources.md for download instructions
+│   ├── video_loader.py          # OpenCV: samples frames from video at configurable interval,
+│   │                            #   generates synthetic telemetry, yields (frame_bytes, telemetry)
 │   ├── blob_store.py            # boto3 MinIO client: upload_frame(), get_frame_bytes()
-│   └── ingest_runner.py         # orchestrates loader → blob upload → POST /ingest
+│   └── ingest_runner.py         # orchestrates video_loader → blob upload → POST /ingest
 │
 ├── agent/
 │   ├── state.py
@@ -623,7 +661,7 @@ drone-security-agent/
 │
 └── docs/
     ├── architecture.md
-    ├── datasets.md
+    ├── video_sources.md
     └── test_cases.md
 ```
 
@@ -633,9 +671,9 @@ drone-security-agent/
 
 | Phase | Focus | Key Output |
 |---|---|---|
-| 1 | Foundation | Docker + DB schema + MinIO + Dataset loader + Blob uploader |
-| 2 | VLM Integration | Real image fetch from MinIO → VLM analysis → embedding + DB helpers |
-| 3 | LangGraph Agent | Full reasoning loop — ingest → analyse real image → reason → log/alert with blob_urls |
+| 1 | Foundation | Docker + DB schema + MinIO + OpenCV-based video frame loader + Blob uploader |
+| 2 | VLM Integration | Real video-frame fetch from MinIO → VLM analysis → embedding + DB helpers |
+| 3 | LangGraph Agent | Full reasoning loop — ingest → analyse real video frame → reason → log/alert with blob_urls |
 | 4 | FastAPI Backend | REST API; search endpoint returns blob_urls for image rendering |
 | 5 | React Dashboard | Image grid search, alert banner with triggering frame, expandable event log thumbnails |
-| 6 | QA + Docs | Test cases (incl. blob_url accessibility), README with dataset download instructions |
+| 6 | QA + Docs | Test cases (incl. blob_url accessibility), README with video-source setup instructions |

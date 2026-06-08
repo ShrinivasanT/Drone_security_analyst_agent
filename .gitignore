@@ -18,6 +18,15 @@ frontend/build/
 pg_data/
 minio_data/
 
+# Source video clips — large binaries, do not commit (document sources/download
+# instructions in docs/video_sources.md instead; see data/videos/ in the plan)
+Data/
+data/videos/
+*.mp4
+*.mov
+*.avi
+*.mkv
+
 # IDE
 .vscode/
 .idea/

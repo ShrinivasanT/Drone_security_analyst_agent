@@ -59,16 +59,28 @@ and is set to public-download.
 
 ---
 
-## Stage 2 — Blob client + dataset loader
+## Stage 2 — Blob client + video frame loader
 
-**Goal:** Can pull a real dataset image and push it to MinIO, getting back a working URL.
+**Goal:** Can sample a real frame from a source video clip and push it to MinIO, getting back a working URL.
 
+- Pick a handful of representative clips from the already-downloaded UCF-Crime "Normal Videos for Event
+  Recognition" set (`Data/Normal_Videos_for_Event_Recognition/...`, ~1.1 GB / 49 clips — too large for git,
+  already `.gitignore`'d) to act as the simulated drone feed; point a `VIDEO_SOURCE_DIR` config entry at them
+  and document the source/re-download steps in `docs/video_sources.md`
 - `data/blob_store.py` — `upload_frame(image_bytes, filename) → blob_url`, `get_frame_bytes(blob_url) → bytes`
-- `data/dataset_loader.py` — HuggingFace `datasets` (and/or Kaggle CLI) iterator yielding
-  `(image_bytes, synthetic_telemetry)` tuples
+- `data/video_loader.py` — opens clips with OpenCV (`cv2.VideoCapture`), samples one frame every *N* seconds
+  of video time, encodes each as JPEG, and generates synthetic telemetry per sampled frame (time-of-day
+  progression mapped from the frame's position in the clip, patrol waypoint, lat/lng, altitude); yields
+  `(frame_bytes, synthetic_telemetry)` tuples — the same shape the rest of the pipeline expects
 
-**Verify:** Upload one test image via `blob_store.upload_frame`, open the returned `blob_url` directly in a browser
-and confirm the image renders; iterate `dataset_loader` for ~5 frames and print the synthetic telemetry for each.
+**Verify:** Run `video_loader` standalone on a test clip for ~5 sampled frames, confirm each decodes to a valid
+JPEG and the generated telemetry looks plausible (progressing time-of-day, cycling locations); upload one sampled
+frame via `blob_store.upload_frame`, open the returned `blob_url` directly in a browser and confirm the frame image
+renders.
+
+*Why this matters for the video switch:* because `video_loader` yields the exact same `(frame_bytes, telemetry)`
+shape the original image-dataset loader did, **nothing downstream of this stage changes** — `blob_store`,
+`ingest_runner`, the agent nodes, the backend, and the frontend are all source-agnostic.
 
 ---
 
@@ -124,9 +136,10 @@ directly on 10 real dataset images and assert correct DB writes.
 
 ## Stage 6 — Ingest runner *(moved down from original Phase 1)*
 
-**Goal:** End-to-end automation — dataset → MinIO → live agent — driven by one script.
+**Goal:** End-to-end automation — source video → sampled frames → MinIO → live agent — driven by one script.
 
-- `data/ingest_runner.py` — loader → `blob_store.upload_frame` → `POST /ingest`, configurable frame count/interval/dataset
+- `data/ingest_runner.py` — `video_loader` → `blob_store.upload_frame` → `POST /ingest`, configurable
+  source clip(s), sampling interval, and frame count
 
 **Verify:** Run it for 20+ frames against the now-live backend; confirm events accumulate, and that at least one
 after-hours or loitering alert fires from the synthetic telemetry timestamps (this is the first point at which this
@@ -178,7 +191,7 @@ thumbnails from `blob_url`, alert banner shows the triggering frame, etc.
 |---|---|---|---|
 | 0 | Scaffolding, git/GitHub, env | — | repo + compose config valid |
 | 1 | Postgres + MinIO running | 0 | tables exist, bucket created |
-| 2 | Blob client + dataset loader | 1 | uploaded test image renders via URL |
+| 2 | Blob client + video frame loader | 1 | sampled frame decodes + uploaded frame renders via URL |
 | 3 | Backend skeleton + stub `/ingest` | 1, 2 | curl POST → row in `frames` |
 | 4 | VLM integration | 2, 3 | 5 real images → valid structured JSON + embeddings |
 | 5 | LangGraph agent (real `/ingest`) | 3, 4 | full cycle on real frame writes events/alerts |

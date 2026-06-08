@@ -1,0 +1,30 @@
+# Backend / API
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-dotenv==1.0.1
+pydantic==2.10.4
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+pgvector==0.3.6
+
+# Blob storage (MinIO via S3 API)
+boto3==1.35.97
+
+# Agent framework
+langgraph==0.2.62
+langchain-core==0.3.28
+langchain-openai==0.3.0
+
+# VLM / embeddings client (OpenAI GPT-4o + text-embedding-3-small)
+openai==1.59.6
+
+# Dataset ingestion
+datasets==3.2.0
+pillow==11.1.0
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.25.2
+httpx==0.28.1

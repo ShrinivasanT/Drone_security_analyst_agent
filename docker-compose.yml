@@ -1,5 +1,4 @@
-# Stage 0 skeleton: storage layer only (postgres + minio).
-# `backend` is added in Stage 3 and `frontend` in Stage 8 once their Dockerfiles exist.
+# Full stack: postgres + minio (storage), backend (FastAPI agent), frontend (React/nginx).
 
 services:
 
@@ -24,8 +23,8 @@ services:
     volumes:
       - minio_data:/data
     ports:
-      - "9000:9000"   # S3 API (boto3 endpoint)
-      - "9001:9001"   # MinIO web console
+      - "9100:9000"   # S3 API (boto3 endpoint); host 9100 because another project already binds 9000
+      - "9101:9001"   # MinIO web console at http://localhost:9101
 
   minio_init:
     image: minio/mc                    # one-shot: create bucket on startup
@@ -37,6 +36,51 @@ services:
         mc mb --ignore-existing local/${MINIO_BUCKET} &&
         mc anonymous set download local/${MINIO_BUCKET}
       "
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      # In-network: backend reaches MinIO at the service name, not the host port.
+      MINIO_ENDPOINT: http://minio:9000
+      # Host-reachable; baked into stored blob_urls so the browser can render frames.
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      # LLM providers. Vision + reasoning run on Groq (OpenAI-compatible). OpenAI is used
+      # for embeddings only, and for chat only if LLM_ALLOW_OPENAI_CHAT=true. Embeddings
+      # fall back to a local hashing embedder when no OPENAI_API_KEY is present.
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
+      LLM_ALLOW_OPENAI_CHAT: ${LLM_ALLOW_OPENAI_CHAT:-false}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_VLM_MODEL: ${GROQ_VLM_MODEL:-}
+      GROQ_TEXT_MODEL: ${GROQ_TEXT_MODEL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_VLM_MODEL: ${OPENAI_VLM_MODEL:-}
+      OPENAI_TEXT_MODEL: ${OPENAI_TEXT_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-auto}
+      VLM_MODEL: ${VLM_MODEL:-}
+      REASONING_MODEL: ${REASONING_MODEL:-}
+    depends_on:
+      - postgres
+      - minio
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # URL the browser uses to reach the backend (host-published port).
+        VITE_API_BASE: ${FRONTEND_API_BASE:-http://localhost:8000}
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
 
 volumes:
   pg_data:

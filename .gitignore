@@ -19,7 +19,10 @@ pg_data/
 minio_data/
 
 # Source video clips — large binaries, do not commit (document sources/download
-# instructions in docs/video_sources.md instead; see data/videos/ in the plan)
+# instructions in docs/video_sources.md). The clips live in videos/ (top-level)
+# because a lowercase data/ directory holds the Python package on case-insensitive
+# filesystems and would collide with a capital-D dataset directory.
+videos/
 Data/
 data/videos/
 *.mp4

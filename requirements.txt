@@ -3,6 +3,7 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 python-dotenv==1.0.1
 pydantic==2.10.4
+python-multipart==0.0.20   # multipart/form-data parsing for FastAPI UploadFile (POST /ingest_video)
 
 # Database
 sqlalchemy[asyncio]==2.0.36
@@ -14,7 +15,7 @@ boto3==1.35.97
 
 # Agent framework
 langgraph==0.2.62
-langchain-core==0.3.28
+langchain-core==0.3.29   # >=0.3.29 required by langchain-openai 0.3.0; allowed by langgraph 0.2.62
 langchain-openai==0.3.0
 
 # VLM / embeddings client (OpenAI GPT-4o + text-embedding-3-small)

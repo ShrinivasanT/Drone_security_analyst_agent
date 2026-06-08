@@ -1,0 +1,24 @@
+# Keep the build context small + fast. The 1.1 GB video dataset and git history
+# must never be sent to the Docker daemon.
+.git
+videos/
+data/videos/
+Data/
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+node_modules/
+frontend/dist/
+frontend/build/
+
+.env
+tmp_*/
+*.log

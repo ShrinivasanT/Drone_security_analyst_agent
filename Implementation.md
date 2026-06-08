@@ -2,7 +2,7 @@
 
 This reorders [02_architecture_and_implementation_plan.md](02_architecture_and_implementation_plan.md) into a single
 linear build sequence for an **empty repo**. The architecture, schema, and node design are unchanged — only the
-*order* and *grouping* of work is revised, to fix two dependency problems in the original phase plan and to make
+_order_ and _grouping_ of work is revised, to fix two dependency problems in the original phase plan and to make
 every stage independently runnable/verifiable before moving on.
 
 ## What changed vs. the original phase plan, and why
@@ -10,11 +10,11 @@ every stage independently runnable/verifiable before moving on.
 1. **FastAPI skeleton + DB helpers moved from Phase 4 → right after the data layer (new Stage 3).**
    The original Phase 1 deliverable `data/ingest_runner.py` calls `POST /ingest` — but that endpoint isn't built
    until Phase 4, three phases later. As written, `ingest_runner.py` would be unrunnable dead code for most of the
-   build. Standing up `backend/main.py` + `agent/db.py` early (with a *stub* `/ingest` that just inserts a row) gives
+   build. Standing up `backend/main.py` + `agent/db.py` early (with a _stub_ `/ingest` that just inserts a row) gives
    every later stage a real, live API to plug into and test against incrementally.
 
 2. **`data/ingest_runner.py` moved from Phase 1 → after the agent loop exists (new Stage 6).**
-   It's the orchestration script that drives the *whole* pipeline end-to-end — it can't be meaningfully tested until
+   It's the orchestration script that drives the _whole_ pipeline end-to-end — it can't be meaningfully tested until
    `/ingest` does real work (VLM analysis → reasoning → DB writes). Writing it last (rather than first) means it's
    verified once, against a complete system, instead of being written early and re-validated three times as the
    stub it calls gets replaced.
@@ -29,7 +29,7 @@ every stage independently runnable/verifiable before moving on.
    that only connect at the very end.
 
 Everything else (schema, node responsibilities, alert rules, frontend panels, QA scenarios, docs) is preserved as-is
-from the original plan — see it for full task detail. This document is the *order*, not a replacement of the *what*.
+from the original plan — see it for full task detail. This document is the _order_, not a replacement of the _what_.
 
 ---
 
@@ -68,7 +68,7 @@ and is set to public-download.
   already `.gitignore`'d) to act as the simulated drone feed; point a `VIDEO_SOURCE_DIR` config entry at them
   and document the source/re-download steps in `docs/video_sources.md`
 - `data/blob_store.py` — `upload_frame(image_bytes, filename) → blob_url`, `get_frame_bytes(blob_url) → bytes`
-- `data/video_loader.py` — opens clips with OpenCV (`cv2.VideoCapture`), samples one frame every *N* seconds
+- `data/video_loader.py` — opens clips with OpenCV (`cv2.VideoCapture`), samples one frame every _N_ seconds
   of video time, encodes each as JPEG, and generates synthetic telemetry per sampled frame (time-of-day
   progression mapped from the frame's position in the clip, patrol waypoint, lat/lng, altitude); yields
   `(frame_bytes, synthetic_telemetry)` tuples — the same shape the rest of the pipeline expects
@@ -78,15 +78,15 @@ JPEG and the generated telemetry looks plausible (progressing time-of-day, cycli
 frame via `blob_store.upload_frame`, open the returned `blob_url` directly in a browser and confirm the frame image
 renders.
 
-*Why this matters for the video switch:* because `video_loader` yields the exact same `(frame_bytes, telemetry)`
+_Why this matters for the video switch:_ because `video_loader` yields the exact same `(frame_bytes, telemetry)`
 shape the original image-dataset loader did, **nothing downstream of this stage changes** — `blob_store`,
 `ingest_runner`, the agent nodes, the backend, and the frontend are all source-agnostic.
 
 ---
 
-## Stage 3 — Backend skeleton + DB helpers *(moved up from original Phase 4)*
+## Stage 3 — Backend skeleton + DB helpers _(moved up from original Phase 4)_
 
-**Goal:** A running FastAPI service with a real database connection and a *stub* `/ingest` — the seam every later
+**Goal:** A running FastAPI service with a real database connection and a _stub_ `/ingest` — the seam every later
 stage plugs into.
 
 - `agent/db.py` — async SQLAlchemy helpers: `insert_frame()`, `insert_event()`, `insert_alert()`, `query_similar_frames()`
@@ -98,7 +98,7 @@ stage plugs into.
 **Verify:** `docker compose up` the full stack so far; `curl -X POST localhost:8000/ingest` with a fake
 `blob_url`/`telemetry` payload; confirm a row lands in `frames`.
 
-*Why here:* this is the dependency the original Phase 1's `ingest_runner.py` silently assumed existed. Building it
+_Why here:_ this is the dependency the original Phase 1's `ingest_runner.py` silently assumed existed. Building it
 now — even as a stub — means every subsequent stage has a live endpoint to integrate against and test incrementally,
 instead of everything only coming together at the very end.
 
@@ -134,7 +134,7 @@ directly on 10 real dataset images and assert correct DB writes.
 
 ---
 
-## Stage 6 — Ingest runner *(moved down from original Phase 1)*
+## Stage 6 — Ingest runner _(moved down from original Phase 1)_
 
 **Goal:** End-to-end automation — source video → sampled frames → MinIO → live agent — driven by one script.
 
@@ -143,7 +143,7 @@ directly on 10 real dataset images and assert correct DB writes.
 
 **Verify:** Run it for 20+ frames against the now-live backend; confirm events accumulate, and that at least one
 after-hours or loitering alert fires from the synthetic telemetry timestamps (this is the first point at which this
-script *can* be meaningfully tested, since it depends on the full agent loop existing).
+script _can_ be meaningfully tested, since it depends on the full agent loop existing).
 
 ---
 
@@ -187,15 +187,15 @@ thumbnails from `blob_url`, alert banner shows the triggering frame, etc.
 
 ## Stage Summary
 
-| Stage | Focus | Depends on | Key verification |
-|---|---|---|---|
-| 0 | Scaffolding, git/GitHub, env | — | repo + compose config valid |
-| 1 | Postgres + MinIO running | 0 | tables exist, bucket created |
-| 2 | Blob client + video frame loader | 1 | sampled frame decodes + uploaded frame renders via URL |
-| 3 | Backend skeleton + stub `/ingest` | 1, 2 | curl POST → row in `frames` |
-| 4 | VLM integration | 2, 3 | 5 real images → valid structured JSON + embeddings |
-| 5 | LangGraph agent (real `/ingest`) | 3, 4 | full cycle on real frame writes events/alerts |
-| 6 | Ingest runner | 5 | 20+ frame run produces events + at least one alert |
-| 7 | Remaining REST endpoints | 5, 6 | each endpoint returns data incl. `blob_url` |
-| 8 | React dashboard | 7 | full stack runs, panels render real thumbnails |
-| 9 | QA, docs, demo, submission | 8 | QA table filled, docs/video/report done, repo shared |
+| Stage | Focus                             | Depends on | Key verification                                       |
+| ----- | --------------------------------- | ---------- | ------------------------------------------------------ |
+| 0     | Scaffolding, git/GitHub, env      | —          | repo + compose config valid                            |
+| 1     | Postgres + MinIO running          | 0          | tables exist, bucket created                           |
+| 2     | Blob client + video frame loader  | 1          | sampled frame decodes + uploaded frame renders via URL |
+| 3     | Backend skeleton + stub `/ingest` | 1, 2       | curl POST → row in `frames`                            |
+| 4     | VLM integration                   | 2, 3       | 5 real images → valid structured JSON + embeddings     |
+| 5     | LangGraph agent (real `/ingest`)  | 3, 4       | full cycle on real frame writes events/alerts          |
+| 6     | Ingest runner                     | 5          | 20+ frame run produces events + at least one alert     |
+| 7     | Remaining REST endpoints          | 5, 6       | each endpoint returns data incl. `blob_url`            |
+| 8     | React dashboard                   | 7          | full stack runs, panels render real thumbnails         |
+| 9     | QA, docs, demo, submission        | 8          | QA table filled, docs/video/report done, repo shared   |

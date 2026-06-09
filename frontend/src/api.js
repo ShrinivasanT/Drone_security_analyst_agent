@@ -19,19 +19,20 @@ async function postJSON(path, body) {
   return res.json();
 }
 
-export const getEvents = (limit = 50) => getJSON(`/events?limit=${limit}`);
-export const getAlerts = (activeOnly = true, limit = 50) =>
-  getJSON(`/alerts?active_only=${activeOnly}&limit=${limit}`);
-export const searchFrames = (q, limit = 12) =>
-  getJSON(`/frames/search?q=${encodeURIComponent(q)}&limit=${limit}`);
-export const getSummary = () => getJSON(`/summary`);
-export const postChat = (question) => postJSON(`/chat`, { question });
-export const getClips = (limit = 20) => getJSON(`/clips?limit=${limit}`);
+// Fixed patrol waypoints (mirrors data/video_loader.py _WAYPOINTS). Drives the telemetry
+// dropdown so an uploaded image is tagged with a plausible location + coordinates.
+export const WAYPOINTS = [
+  { location: "main_gate", lat: 18.5204, lng: 73.8567 },
+  { location: "parking_lot", lat: 18.521, lng: 73.857 },
+  { location: "warehouse_a", lat: 18.5215, lng: 73.8575 },
+  { location: "perimeter_north", lat: 18.522, lng: 73.858 },
+  { location: "perimeter_east", lat: 18.5218, lng: 73.859 },
+  { location: "loading_dock", lat: 18.5212, lng: 73.8585 },
+];
 
-// Upload + ingest a video clip (multipart). `formData` carries the file + telemetry
-// fields; do NOT set Content-Type — the browser adds the multipart boundary itself.
-async function ingestVideo(formData) {
-  const res = await fetch(`${API_BASE}/ingest_video`, { method: "POST", body: formData });
+// Multipart upload of a single image + telemetry → runs the per-frame agent.
+export async function ingestImage(formData) {
+  const res = await fetch(`${API_BASE}/ingest_image`, { method: "POST", body: formData });
   if (!res.ok) {
     let detail = `${res.status}`;
     try {
@@ -39,11 +40,19 @@ async function ingestVideo(formData) {
     } catch {
       /* non-JSON error body */
     }
-    throw new Error(detail);
+    throw new Error(`/ingest_image -> ${detail}`);
   }
   return res.json();
 }
-export { ingestVideo };
+
+export const getEvents = (limit = 50) => getJSON(`/events?limit=${limit}`);
+export const getFrames = (limit = 10) => getJSON(`/frames?limit=${limit}`);
+export const getAlerts = (activeOnly = true, limit = 50) =>
+  getJSON(`/alerts?active_only=${activeOnly}&limit=${limit}`);
+export const searchFrames = (q, limit = 12) =>
+  getJSON(`/frames/search?q=${encodeURIComponent(q)}&limit=${limit}`);
+export const getSummary = () => getJSON(`/summary`);
+export const postChat = (question, history = []) => postJSON(`/chat`, { question, history });
 
 // Severity → Tailwind classes for badges/borders.
 export const severityClasses = (severity) =>

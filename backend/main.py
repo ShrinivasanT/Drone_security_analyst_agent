@@ -1,9 +1,9 @@
 """FastAPI application entrypoint.
 
-Stage 3 scope: CORS, a lifespan that stands up the async DB engine and a MinIO
-(boto3) client, a health check, and the stub ``POST /ingest`` route. Later stages
-add the remaining routes (events, alerts, frames/search, summary, chat) and swap the
-ingest stub for the real LangGraph agent.
+CORS, a lifespan that stands up the async DB engine and a MinIO (boto3) client, a health
+check, and the operator-facing routes: ``POST /ingest`` (runs the per-frame LangGraph
+agent) plus ``GET /events``, ``GET /alerts``, ``GET /frames/search``, ``GET /summary`` and
+``POST /chat``.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from agent import db
-from backend.routes import alerts, chat, events, frames, ingest, ingest_video, summary
+from backend.routes import alerts, chat, events, frames, ingest, summary
 
 load_dotenv()
 
@@ -36,10 +36,9 @@ def _make_minio_client():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: DB engine + connectivity check, idempotent migration, MinIO client.
+    # Startup: DB engine + connectivity check, MinIO client.
     db.init_db()
     await db.ping()
-    await db.migrate()
     app.state.minio = _make_minio_client()
     app.state.minio_bucket = os.environ.get("MINIO_BUCKET", "drone-frames")
     try:
@@ -59,7 +58,6 @@ app.add_middleware(
 )
 
 app.include_router(ingest.router)
-app.include_router(ingest_video.router)
 app.include_router(events.router)
 app.include_router(alerts.router)
 app.include_router(frames.router)

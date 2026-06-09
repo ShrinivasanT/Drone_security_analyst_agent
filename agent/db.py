@@ -66,37 +66,6 @@ async def ping() -> bool:
     return True
 
 
-# Idempotent schema migration for the video-level flow. db/init.sql only runs on a fresh
-# volume, so existing databases need these columns/table added in place at startup.
-_MIGRATIONS = (
-    "ALTER TABLE frames ADD COLUMN IF NOT EXISTS clip_id TEXT",
-    "ALTER TABLE events ADD COLUMN IF NOT EXISTS clip_id TEXT",
-    "ALTER TABLE alerts ADD COLUMN IF NOT EXISTS clip_id TEXT",
-    "CREATE INDEX IF NOT EXISTS frames_clip_id_idx ON frames (clip_id)",
-    """
-    CREATE TABLE IF NOT EXISTS clips (
-        clip_id                 TEXT PRIMARY KEY,
-        filename                TEXT,
-        frame_count             INTEGER,
-        action_summary          TEXT,
-        verdict                 TEXT,
-        severity                TEXT,
-        narrative               TEXT,
-        representative_blob_url  TEXT,
-        created_at              TIMESTAMPTZ DEFAULT NOW()
-    )
-    """,
-)
-
-
-async def migrate() -> None:
-    """Apply idempotent DDL so existing databases gain the clip_id columns + clips table."""
-    engine = get_engine()
-    async with engine.begin() as conn:
-        for stmt in _MIGRATIONS:
-            await conn.execute(text(stmt))
-
-
 # --------------------------------------------------------------------------- #
 # Writes
 # --------------------------------------------------------------------------- #
@@ -105,11 +74,11 @@ _INSERT_FRAME = text(
     """
     INSERT INTO frames (
         frame_id, timestamp, blob_url, location, object_type, action,
-        clothing, color, raw_description, embedding, telemetry, clip_id
+        clothing, color, raw_description, embedding, telemetry
     ) VALUES (
         :frame_id, :timestamp, :blob_url, :location, :object_type, :action,
         :clothing, :color, :raw_description, CAST(:embedding AS vector),
-        CAST(:telemetry AS jsonb), :clip_id
+        CAST(:telemetry AS jsonb)
     )
     RETURNING id, frame_id
     """
@@ -129,7 +98,6 @@ async def insert_frame(
     color: str | None = None,
     embedding: Sequence[float] | None = None,
     telemetry: dict[str, Any] | None = None,
-    clip_id: str | None = None,
 ) -> dict[str, Any]:
     """Persist a frame row; returns ``{id, frame_id}``."""
     engine = get_engine()
@@ -145,7 +113,6 @@ async def insert_frame(
         "raw_description": raw_description,
         "embedding": _vector_literal(embedding),
         "telemetry": json.dumps(telemetry) if telemetry is not None else None,
-        "clip_id": clip_id,
     }
     async with engine.begin() as conn:
         row = (await conn.execute(_INSERT_FRAME, params)).mappings().one()
@@ -154,8 +121,8 @@ async def insert_frame(
 
 _INSERT_EVENT = text(
     """
-    INSERT INTO events (event_type, description, severity, frame_id, blob_url, clip_id)
-    VALUES (:event_type, :description, :severity, :frame_id, :blob_url, :clip_id)
+    INSERT INTO events (event_type, description, severity, frame_id, blob_url)
+    VALUES (:event_type, :description, :severity, :frame_id, :blob_url)
     RETURNING id
     """
 )
@@ -168,7 +135,6 @@ async def insert_event(
     severity: str = "info",
     frame_id: str | None = None,
     blob_url: str | None = None,
-    clip_id: str | None = None,
 ) -> dict[str, Any]:
     engine = get_engine()
     params = {
@@ -177,7 +143,6 @@ async def insert_event(
         "severity": severity,
         "frame_id": frame_id,
         "blob_url": blob_url,
-        "clip_id": clip_id,
     }
     async with engine.begin() as conn:
         row = (await conn.execute(_INSERT_EVENT, params)).mappings().one()
@@ -186,8 +151,8 @@ async def insert_event(
 
 _INSERT_ALERT = text(
     """
-    INSERT INTO alerts (rule, message, severity, blob_url, clip_id, metadata)
-    VALUES (:rule, :message, :severity, :blob_url, :clip_id, CAST(:metadata AS jsonb))
+    INSERT INTO alerts (rule, message, severity, blob_url, metadata)
+    VALUES (:rule, :message, :severity, :blob_url, CAST(:metadata AS jsonb))
     RETURNING id
     """
 )
@@ -199,7 +164,6 @@ async def insert_alert(
     message: str,
     severity: str,
     blob_url: str | None = None,
-    clip_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     engine = get_engine()
@@ -208,53 +172,10 @@ async def insert_alert(
         "message": message,
         "severity": severity,
         "blob_url": blob_url,
-        "clip_id": clip_id,
         "metadata": json.dumps(metadata) if metadata is not None else None,
     }
     async with engine.begin() as conn:
         row = (await conn.execute(_INSERT_ALERT, params)).mappings().one()
-    return dict(row)
-
-
-_INSERT_CLIP = text(
-    """
-    INSERT INTO clips (
-        clip_id, filename, frame_count, action_summary, verdict,
-        severity, narrative, representative_blob_url
-    ) VALUES (
-        :clip_id, :filename, :frame_count, :action_summary, :verdict,
-        :severity, :narrative, :representative_blob_url
-    )
-    RETURNING clip_id, created_at
-    """
-)
-
-
-async def insert_clip(
-    *,
-    clip_id: str,
-    filename: str | None,
-    frame_count: int,
-    action_summary: str,
-    verdict: str,
-    severity: str,
-    narrative: str,
-    representative_blob_url: str | None = None,
-) -> dict[str, Any]:
-    """Persist the clip-level verdict row; returns ``{clip_id, created_at}``."""
-    engine = get_engine()
-    params = {
-        "clip_id": clip_id,
-        "filename": filename,
-        "frame_count": frame_count,
-        "action_summary": action_summary,
-        "verdict": verdict,
-        "severity": severity,
-        "narrative": narrative,
-        "representative_blob_url": representative_blob_url,
-    }
-    async with engine.begin() as conn:
-        row = (await conn.execute(_INSERT_CLIP, params)).mappings().one()
     return dict(row)
 
 
@@ -345,6 +266,27 @@ async def fetch_events(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]
     return [dict(r) for r in rows]
 
 
+_FETCH_FRAMES = text(
+    """
+    SELECT id, frame_id, timestamp, blob_url, location, object_type,
+           action, color, raw_description, telemetry
+    FROM frames
+    ORDER BY id DESC
+    LIMIT :limit OFFSET :offset
+    """
+)
+
+
+async def fetch_recent_frames(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    """Most recently ingested frames first — every frame, regardless of event/alert route."""
+    engine = get_engine()
+    async with engine.connect() as conn:
+        rows = (
+            await conn.execute(_FETCH_FRAMES, {"limit": limit, "offset": offset})
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
 _FETCH_ALERTS = text(
     """
     SELECT id, rule, message, severity, blob_url, triggered_at, resolved_at, metadata
@@ -364,27 +306,6 @@ async def fetch_alerts(
     params = {"limit": limit, "offset": offset, "active_only": active_only}
     async with engine.connect() as conn:
         rows = (await conn.execute(_FETCH_ALERTS, params)).mappings().all()
-    return [dict(r) for r in rows]
-
-
-_FETCH_CLIPS = text(
-    """
-    SELECT clip_id, filename, frame_count, action_summary, verdict,
-           severity, narrative, representative_blob_url, created_at
-    FROM clips
-    ORDER BY created_at DESC
-    LIMIT :limit OFFSET :offset
-    """
-)
-
-
-async def fetch_clips(limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
-    """Most recently ingested clips first, with their verdict."""
-    engine = get_engine()
-    async with engine.connect() as conn:
-        rows = (
-            await conn.execute(_FETCH_CLIPS, {"limit": limit, "offset": offset})
-        ).mappings().all()
     return [dict(r) for r in rows]
 
 

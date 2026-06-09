@@ -1,9 +1,10 @@
 """update_state node — persist the analyzed frame and build the API result.
 
-Terminal node of the per-frame pipeline. Alerting now happens at the video level
-(agent/video_pipeline.py), so this node is analysis-only: it writes the frame row
-(metadata + blob_url + embedding), advances the session rolling window, and returns the
-payload ``POST /ingest`` responds with. It no longer logs events or triggers alerts.
+Terminal node of the per-frame pipeline. It writes the frame row (metadata + blob_url +
+embedding), advances the durable session memory (rolling window of recent frames, plus the
+events/alerts accumulated this cycle by log_event/trigger_alert), and returns the payload
+``POST /ingest`` responds with — including the routing decision and how many events/alerts
+were raised.
 """
 
 from __future__ import annotations
@@ -20,6 +21,9 @@ async def node(state: AgentState) -> dict:
     telemetry = state.get("telemetry", {})
     blob_url = current["blob_url"]
     embedding = current.get("embedding")
+    decision = state.get("decision", {})
+    route = decision.get("route", "normal")
+    fired = decision.get("fired_rules", [])
 
     frame_id = f"frame_{uuid.uuid4().hex}"
     # Location stored on the frame is the telemetry waypoint (falls back to VLM scene).
@@ -39,7 +43,9 @@ async def node(state: AgentState) -> dict:
         telemetry=telemetry,
     )
 
-    # Advance durable session memory (rolling window of recent frame summaries).
+    # Advance durable session memory: rolling window + write back this cycle's
+    # events/alerts so cross-frame rules (loitering, repeat vehicle) and the operator
+    # views see them on subsequent frames.
     session = get_session()
     session.push_frame({
         "frame_id": frame_id,
@@ -50,13 +56,18 @@ async def node(state: AgentState) -> dict:
         "color": vlm.get("color", ""),
         "time": telemetry.get("time"),
     })
+    session.events_today = list(state.get("events_today", []))
+    session.active_alerts = list(state.get("active_alerts", []))
 
     result = {
         "status": "ok",
-        "stub": False,
         "frame_id": frame_id,
         "db_id": frame_row["id"],
         "blob_url": blob_url,
         "vlm": vlm,
+        "decision": decision,
+        "fired_rules": fired,
+        "events_logged": 1 if route in ("log", "alert") else 0,
+        "alerts_triggered": len(fired) if route == "alert" else 0,
     }
     return {"result": result}

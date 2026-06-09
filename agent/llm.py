@@ -129,17 +129,30 @@ def complete_json(
     image_data_uri: str | None = None,
     image_data_uris: list[str] | None = None,
     temperature: float = 0,
+    history: list[dict] | None = None,
+    provider: str | None = None,
 ) -> dict:
     """Call the first working provider and return a parsed JSON object.
 
     Pass ``image_data_uri`` (single) or ``image_data_uris`` (several, e.g. representative
     frames of a clip) to make it a vision request; with neither it's a text request (with
     JSON-mode response_format requested). The two image args are merged, single first.
+
+    ``history`` injects prior turns (list of ``{"role": ..., "content": ...}`` dicts)
+    between the system prompt and the current user message for multi-turn chat.
+
+    ``provider`` forces a specific provider (``"openai"`` or ``"groq"``), falling back to
+    the default chain if that provider is unavailable.
     """
     images = [image_data_uri] if image_data_uri else []
     images += image_data_uris or []
 
-    order = provider_order()
+    if provider and _have(provider):
+        order = [provider]
+    else:
+        order = provider_order()
+        # If a preferred provider was requested but unavailable, still try the default chain.
+
     if not order:
         raise RuntimeError(
             "no chat/vision provider available: set GROQ_API_KEY "
@@ -150,9 +163,9 @@ def complete_json(
     kind = "vision" if images else "text"
     last_err: Exception | None = None
 
-    for provider in order:
-        client = _client(provider)
-        model = _model(provider, kind)
+    for prov in order:
+        client = _client(prov)
+        model = _model(prov, kind)
         try:
             if images:
                 # Fold the system instruction into the user turn — most compatible with
@@ -166,6 +179,7 @@ def complete_json(
             else:
                 messages = [
                     {"role": "system", "content": system},
+                    *(history or []),
                     {"role": "user", "content": text},
                 ]
                 kwargs = {"response_format": {"type": "json_object"}}
@@ -179,6 +193,50 @@ def complete_json(
             continue
 
     raise RuntimeError(f"all LLM providers failed ({order}): {last_err}")
+
+
+def complete_with_tools(
+    *,
+    system: str,
+    messages: list[dict],
+    tools: list[dict],
+    temperature: float = 0,
+    provider: str | None = "openai",
+):
+    """LLM call with tool definitions for ReAct-style loops.
+
+    ``messages`` is the full conversation so far (no system message — prepended internally).
+    Returns the raw ``message`` object; callers inspect ``.tool_calls`` to decide whether
+    to execute tools or treat ``.content`` as the final answer.
+    """
+    if provider and _have(provider):
+        prov = provider
+    else:
+        order = provider_order()
+        if not order:
+            raise RuntimeError(
+                "no provider available for tool calling: set OPENAI_API_KEY or GROQ_API_KEY"
+            )
+        prov = order[0]
+
+    client = _client(prov)
+    model = _model(prov, "text")
+    full_messages = [{"role": "system", "content": system}, *messages]
+
+    # Only advertise tools when some are provided — an empty list with
+    # tool_choice="auto" is rejected by the API. No tools → plain completion,
+    # which is how the caller forces a final answer.
+    kwargs: dict = {}
+    if tools:
+        kwargs = {"tools": tools, "tool_choice": "auto"}
+
+    resp = client.chat.completions.create(
+        model=model,
+        temperature=temperature,
+        messages=full_messages,
+        **kwargs,
+    )
+    return resp.choices[0].message
 
 
 def active_provider() -> str | None:

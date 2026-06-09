@@ -1,10 +1,10 @@
 import AlertBanner from "./components/AlertBanner.jsx";
+import UploadPanel from "./components/UploadPanel.jsx";
 import TelemetryFeed from "./components/TelemetryFeed.jsx";
 import EventLog from "./components/EventLog.jsx";
 import FrameSearch from "./components/FrameSearch.jsx";
 import ChatBox from "./components/ChatBox.jsx";
 import SessionSummary from "./components/SessionSummary.jsx";
-import VideoUpload from "./components/VideoUpload.jsx";
 import { API_BASE } from "./api.js";
 
 export default function App() {
@@ -22,9 +22,11 @@ export default function App() {
       <main className="space-y-4 p-4 lg:p-6">
         <AlertBanner />
 
-        <VideoUpload />
-
         <div className="grid gap-4 lg:grid-cols-3">
+          <div className="lg:col-span-3">
+            <UploadPanel />
+          </div>
+
           <div className="h-[360px] lg:col-span-1">
             <TelemetryFeed />
           </div>

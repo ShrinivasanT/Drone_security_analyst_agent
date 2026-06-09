@@ -1,4 +1,4 @@
-"""GET /frames/search — semantic frame search (pgvector); returns blob_url per match."""
+"""GET /frames — recent-frame feed; GET /frames/search — semantic frame search (pgvector)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,20 @@ from agent import db
 from agent.embedder import embed_text
 
 router = APIRouter()
+
+
+@router.get("/frames")
+async def list_frames(
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> dict:
+    """Every ingested frame, newest first — drives the Live Telemetry Feed.
+
+    Unlike ``/events`` (only logged/alerted frames), this lists *all* frames, so an
+    uploaded image with no alert still shows up here.
+    """
+    frames = await db.fetch_recent_frames(limit=limit, offset=offset)
+    return {"count": len(frames), "frames": frames}
 
 
 @router.get("/frames/search")

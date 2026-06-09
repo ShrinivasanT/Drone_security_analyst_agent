@@ -14,9 +14,12 @@ export default function ChatBox() {
     if (!qq) return;
     setQuestion("");
     setLoading(true);
-    setTurns((t) => [...t, { role: "user", text: qq }]);
+    const currentTurns = [...turns, { role: "user", text: qq }];
+    setTurns(currentTurns);
+    // Build history from all prior turns (exclude the question we just added).
+    const history = turns.map((t) => ({ role: t.role, content: t.text }));
     try {
-      const data = await postChat(qq);
+      const data = await postChat(qq, history);
       setTurns((t) => [...t, { role: "assistant", text: data.answer, refs: data.references || [] }]);
     } catch (err) {
       setTurns((t) => [...t, { role: "assistant", text: `Error: ${err.message}`, refs: [] }]);

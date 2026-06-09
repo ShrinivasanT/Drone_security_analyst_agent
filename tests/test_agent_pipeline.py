@@ -1,11 +1,11 @@
-"""Video-level verification: run the clip flow on one short clip; assert DB writes.
+"""Per-frame agent verification (Stage 5): run the full graph on real frames; assert DB writes.
 
-Runs agent.video_pipeline.process_video on a single source clip (frames sampled, each
-analyzed with Groq vision and persisted, then one clip-level verdict), and asserts:
-  * every sampled frame persisted a frames row sharing the clip's clip_id, with a real
-    blob_url and a 1536-dim embedding
-  * exactly one clips row was written for that clip
-  * a clip-level event was logged (and an alert row exists iff the verdict alerted)
+Samples a few frames from a source clip, uploads each to MinIO, and runs the per-frame
+LangGraph agent via ``agent.graph.run_frame`` (ingest_frame → analyze_frame → query_history
+→ reason_decide → log/alert → update_state). Asserts that:
+  * each cycle returns an ``ok`` result with a routing decision (normal/log/alert) and the
+    structured VLM analysis
+  * every processed frame persisted a frames row with a real blob_url and a 1536-dim embedding
 
 Connects to the host-published Postgres (localhost:5432). Skips automatically if
 GROQ_API_KEY is unset or MinIO/Postgres/the clips are unreachable.
@@ -23,9 +23,13 @@ from sqlalchemy import text
 load_dotenv()
 
 from agent import db
-from agent.video_pipeline import process_video
+from agent.graph import run_frame
+from agent.state import reset_session
+from data.blob_store import upload_frame
+from data.video_loader import sample_frames
 
-MAX_FRAMES = 6
+N_FRAMES = 6
+VALID_ROUTES = {"normal", "log", "alert"}
 TEST_DB_URL = os.environ.get(
     "TEST_DATABASE_URL",
     "postgresql+asyncpg://drone:drone_pass@localhost:5432/drone_security",
@@ -33,15 +37,14 @@ TEST_DB_URL = os.environ.get(
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("GROQ_API_KEY"),
-    reason="GROQ_API_KEY not set; skipping live clip pipeline test (vision on Groq)",
+    reason="GROQ_API_KEY not set; skipping live per-frame pipeline test (vision on Groq)",
 )
 
 
-async def test_video_pipeline_end_to_end():
+async def test_agent_pipeline_end_to_end():
     db.init_db(TEST_DB_URL)
     try:
         await db.ping()
-        await db.migrate()
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"Postgres not reachable at {TEST_DB_URL}: {exc}")
 
@@ -49,66 +52,46 @@ async def test_video_pipeline_end_to_end():
     if not clips:
         pytest.skip("no .mp4 clips under VIDEO_SOURCE_DIR")
 
+    reset_session()
+    ran = 0
     try:
-        result = await process_video(
-            video_path=str(clips[0]),
-            filename=clips[0].name,
-            interval=2.0,
-            max_frames=MAX_FRAMES,
-            seed=7,
-        )
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"clip pipeline could not run (MinIO/clip/API issue): {exc}")
+        for frame_bytes, telemetry in sample_frames(
+            str(clips[0]), interval_seconds=2.0, max_frames=N_FRAMES, seed=7
+        ):
+            blob_url = upload_frame(frame_bytes)
+            result = await run_frame(blob_url, telemetry)
+            ran += 1
 
-    clip_id = result["clip_id"]
-    assert clip_id.startswith("clip_")
-    assert 1 <= result["frame_count"] <= MAX_FRAMES
-    assert len(result["frames"]) == result["frame_count"]
+            assert result["status"] == "ok"
+            assert result["blob_url"] == blob_url
+            assert result["frame_id"].startswith("frame_")
+            assert result["decision"]["route"] in VALID_ROUTES
+            for key in ("object_type", "location", "action", "confidence"):
+                assert key in result["vlm"]
+    except AssertionError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — MinIO/clip/API issue, not a test failure
+        pytest.skip(f"per-frame pipeline could not run (MinIO/clip/API issue): {exc}")
 
-    verdict = result["verdict"]
-    for key in ("action_summary", "alert", "severity", "event_type", "narrative"):
-        assert key in verdict
+    if ran == 0:
+        pytest.skip("no frames sampled from the clip")
 
     engine = db.get_engine()
     async with engine.connect() as conn:
-        # 1) every frame persisted under this clip_id, with a 1536-dim embedding
-        frame_rows = (
+        rows = (
             await conn.execute(
                 text(
                     "SELECT blob_url, embedding IS NOT NULL AS has_emb,"
                     " vector_dims(embedding) AS dims"
-                    " FROM frames WHERE clip_id = :cid"
+                    " FROM frames ORDER BY id DESC LIMIT :n"
                 ),
-                {"cid": clip_id},
+                {"n": ran},
             )
         ).mappings().all()
-        assert len(frame_rows) == result["frame_count"]
-        for row in frame_rows:
+        assert len(rows) == ran
+        for row in rows:
             assert row["blob_url"].startswith("http")
             assert row["has_emb"] is True
             assert row["dims"] == 1536
-
-        # 2) exactly one clips row for this clip
-        clip_count = (
-            await conn.execute(
-                text("SELECT COUNT(*) FROM clips WHERE clip_id = :cid"), {"cid": clip_id}
-            )
-        ).scalar_one()
-        assert clip_count == 1
-
-        # 3) a clip-level event; an alert row iff the verdict alerted
-        event_count = (
-            await conn.execute(
-                text("SELECT COUNT(*) FROM events WHERE clip_id = :cid"), {"cid": clip_id}
-            )
-        ).scalar_one()
-        assert event_count >= 1
-
-        alert_count = (
-            await conn.execute(
-                text("SELECT COUNT(*) FROM alerts WHERE clip_id = :cid"), {"cid": clip_id}
-            )
-        ).scalar_one()
-        assert alert_count == (1 if verdict["alert"] else 0)
 
     await db.close_db()

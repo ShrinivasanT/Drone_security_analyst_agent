@@ -1,16 +1,17 @@
 import { useEffect, useState } from "react";
-import { getEvents, severityClasses } from "../api.js";
+import { getFrames } from "../api.js";
 
-// Live scrolling feed of the latest events (polls every 2s), thumbnail per row.
+// Live scrolling feed of every ingested frame (polls every 2s), thumbnail per row.
+// Unlike the Event Log, this lists ALL frames — an upload with no alert still appears.
 export default function TelemetryFeed() {
-  const [events, setEvents] = useState([]);
+  const [frames, setFrames] = useState([]);
 
   useEffect(() => {
     let live = true;
     const tick = async () => {
       try {
-        const data = await getEvents(10);
-        if (live) setEvents(data.events || []);
+        const data = await getFrames(10);
+        if (live) setFrames(data.frames || []);
       } catch {
         /* transient */
       }
@@ -26,23 +27,31 @@ export default function TelemetryFeed() {
   return (
     <Panel title="Live Telemetry Feed" subtitle="latest 10 · 2s">
       <ul className="space-y-2">
-        {events.map((e) => (
-          <li key={e.id} className="flex items-center gap-3 rounded bg-slate-800/60 p-2">
-            {e.blob_url && (
-              <img src={e.blob_url} alt="" className="h-10 w-14 flex-none rounded object-cover" />
-            )}
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <span className={`rounded px-1.5 text-[10px] font-bold uppercase ${severityClasses(e.severity)}`}>
-                  {e.severity}
-                </span>
-                <span className="truncate text-xs font-medium text-slate-200">{e.event_type}</span>
+        {frames.map((f) => {
+          const time = (f.telemetry && f.telemetry.time) || "";
+          return (
+            <li key={f.id} className="flex items-center gap-3 rounded bg-slate-800/60 p-2">
+              {f.blob_url && (
+                <img src={f.blob_url} alt="" className="h-10 w-14 flex-none rounded object-cover" />
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="rounded bg-slate-700 px-1.5 text-[10px] font-bold uppercase text-slate-200">
+                    {f.object_type || "frame"}
+                  </span>
+                  <span className="truncate text-xs font-medium text-slate-300">
+                    {f.location || "unknown"}
+                  </span>
+                  {time && <span className="ml-auto flex-none text-[10px] text-slate-500">{time}</span>}
+                </div>
+                <p className="truncate text-xs text-slate-400">
+                  {f.raw_description || `${f.color || ""} ${f.object_type || ""} ${f.action || ""}`.trim()}
+                </p>
               </div>
-              <p className="truncate text-xs text-slate-400">{e.description}</p>
-            </div>
-          </li>
-        ))}
-        {events.length === 0 && <p className="text-sm text-slate-500">No events yet.</p>}
+            </li>
+          );
+        })}
+        {frames.length === 0 && <p className="text-sm text-slate-500">No frames yet.</p>}
       </ul>
     </Panel>
   );
